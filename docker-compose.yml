@@ -1,0 +1,100 @@
+services:
+  npm:
+    # Nginx Proxy Manager - the fleet's reverse proxy.
+    #
+    # WHY THIS IS A GIT-BACKED PORTainer STACK:
+    #   This container used to be a bare `docker run` with no compose file and
+    #   no repo, so NONE of the fleet's update machinery could see it. It sat
+    #   on v2.16.0 while upstream shipped v2.17.0 and v2.17.1, and NPM's own
+    #   UI badge showed "Update Available: v2.17.1" indefinitely. Bringing it
+    #   under git means the floating-tag updater and the drift audit both see
+    #   it from now on.
+    #
+    # WHY THE DIGEST IS PINNED:
+    #   A floating `:latest` can never advance on its own - Portainer's poll
+    #   redeploys the tag exactly as written and does not re-pull. The pin
+    #   names the artifact, and fleet_float_autoupdate.py advances it when
+    #   upstream moves.
+    image: jc21/nginx-proxy-manager:2.17.1@sha256:04a9d0835560b9719ab577275f84fe1f713298a1c1e2bdefa034b87f10e062e1
+    container_name: local-npm
+    restart: always
+    ports:
+      - "80:80/tcp"
+      - "443:443/tcp"
+      - "81:81/tcp"
+    volumes:
+      # Named volumes, not bind mounts: they already hold this stack's state
+      # and are shared with the container that is being replaced.
+      - local-npm-data:/data
+      - local-npm-letsencrypt:/etc/letsencrypt
+    networks:
+      - default
+
+    # ---------------------------------------------------------------------
+    # THE CRITICAL PART: the Route53 certbot plugin.
+    #
+    # Nginx Proxy Manager does NOT bundle any certbot DNS plugins in its
+    # image. `certbot plugins` on a fresh 2.17.1 container lists ZERO dns-*
+    # plugins. The plugin is installed on demand by
+    # /app/scripts/install-certbot-plugins, which pip-installs
+    # certbot-dns-route53 at the version matching the bundled certbot
+    # (certbot 5.10.0 -> certbot-dns-route53==5.10.0, see
+    # /app/certbot/dns-plugins.json where the version is templated as
+    # "=={{certbot-version}}").
+    #
+    # The renewal path does NOT install the plugin. Only the INITIAL
+    # issuance path calls installPlugin() (certificate.js:1097). Renewal
+    # runs `certbot renew`, which loads the authenticator named in
+    # /etc/letsencrypt/renewal/npm-<id>.conf - "authenticator = dns-route53" -
+    # and that plugin must already be importable.
+    #
+    # The previously running container had the plugin because somebody
+    # pip-installed it into the container layer on 2026-10-29 (7044 files
+    # added on top of the image). Recreating the container from the image
+    # alone would have DROPPED it, and all 105 Let's Encrypt certificates
+    # - every one of them using dns_challenge with dns_provider=route53 -
+    # would have failed to renew. 31 of them expire within 60 days.
+    #
+    # So the plugin is installed at container start, on every boot, by
+    # running NPM's OWN installer. That keeps it in lockstep with the
+    # certbot version in whichever image is running, which is required
+    # because the plugin version is pinned to match certbot's.
+    #
+    # The install is idempotent and cheap when already present (pip reports
+    # "Requirement already satisfied"). If it fails, NPM still starts and
+    # serves traffic - only renewal would be affected - so the failure is
+    # logged loudly rather than blocking startup.
+    # ---------------------------------------------------------------------
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -o pipefail
+        # /usr/bin/common.sh derives CERTBOT_VERSION from the installed
+        # certbot and exports it. The plugin's version is pinned to match
+        # certbot's ("=={{certbot-version}}" in dns-plugins.json), so this
+        # MUST be sourced before install-certbot-plugins - otherwise it
+        # tries to install "certbot-dns-route53==undefined" and fails.
+        . /usr/bin/common.sh
+        echo "==> installing certbot DNS plugins (route53) for certbot ${CERTBOT_VERSION}"
+        if /app/scripts/install-certbot-plugins route53; then
+          echo "==> certbot plugins now:"; certbot plugins 2>&1 | grep -E 'dns-' || true
+        else
+          echo "!! WARNING: certbot plugin install FAILED - existing certificates" >&2
+          echo "!! will NOT be able to renew until this is fixed." >&2
+        fi
+        exec /init
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:81/api/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  local-npm-data:
+    name: local-npm-data
+    external: true
+  local-npm-letsencrypt:
+    name: local-npm-letsencrypt
+    external: true
