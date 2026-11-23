@@ -86,7 +86,7 @@ services:
         exec /init
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:81/api/ || exit 1"]
-      interval: 30s
+      interval: 45s
       timeout: 10s
       retries: 5
       start_period: 60s
