@@ -10,12 +10,30 @@ services:
     #   under git means the floating-tag updater and the drift audit both see
     #   it from now on.
     #
-    # WHY THE DIGEST IS PINNED:
-    #   A floating `:latest` can never advance on its own - Portainer's poll
-    #   redeploys the tag exactly as written and does not re-pull. The pin
-    #   names the artifact, and fleet_float_autoupdate.py advances it when
-    #   upstream moves.
-    image: jc21/nginx-proxy-manager:2.17.1@sha256:04a9d0835560b9719ab577275f84fe1f713298a1c1e2bdefa034b87f10e062e1
+    # WHY A VERSION TAG, NOT A FLOATING TAG AND NOT A DIGEST:
+    #   `:latest` can never advance on its own - Portainer's poll redeploys
+    #   the tag exactly as written and does not re-pull. So the tag is a
+    #   real version.
+    #
+    #   A digest pin ("...:2.17.1@sha256:...") was tried here first and is
+    #   WRONG for this fleet: discover_version_drift.py classifies any
+    #   "@sha256:" reference as "digest-pin" and NEVER looks up upstream
+    #   tags for it, so the scanner could never see that 2.17.2 exists, and
+    #   fleet_float_updater.py skips every "@sha256:" reference in its
+    #   discovery pass. A digest pin here would freeze this image forever -
+    #   the exact failure this whole migration set out to fix.
+    #
+    #   With a plain version tag the fleet's own machinery owns it:
+    #   - discover_version_drift.py sees it as "current", and reports it as
+    #     "behind" when 2.17.2 ships (a patch within the same release line,
+    #     which fleet_drift_autoupdate.py may apply unattended).
+    #   - a release-line move (2.18.0) is a MINOR bump and stays
+    #     review-only, which is correct for a stateful proxy.
+    #   - config/float_tracking.json keeps a local-npm entry so the tracked
+    #     advance path can also re-resolve and re-pin this reference.
+    #   This matches the form used by the other 39 "current" images in the
+    #   fleet - every one of them is a plain version tag.
+    image: jc21/nginx-proxy-manager:2.17.1
     container_name: local-npm
     restart: always
     ports:
